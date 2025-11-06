@@ -1,0 +1,31 @@
+var terraclimate = ee.ImageCollection("IDAHO_EPSCOR/TERRACLIMATE");
+var geometry = ee.FeatureCollection("projects/ee-mohammadoney/assets/fullbayofbengal");
+var tmax = terraclimate.select('tmmx');
+
+var scaleImage = function(image) {
+  return image.multiply(0.1)
+    .copyProperties(image,['system:time_start']);
+};
+var tmaxScaled = tmax.map(scaleImage);
+
+var image = ee.Image(terraclimate.first())
+
+var filtered = tmaxScaled
+  .filter(ee.Filter.date('1974-01-01', '2024-01-01'))
+  .filter(ee.Filter.bounds(geometry));
+
+//Create a time series chart
+var chart= ui.Chart.image.series({
+  imageCollection:filtered , 
+  region:geometry , 
+  reducer: ee.Reducer.mean(), 
+  scale: 4638.312116386398}).setOptions({
+    "title": "50 year time series of temparature of Bay of Bengal",
+    "hAxis": {title:"", format:"YYYY-MMM"},
+    "vAxis": {title:"Temparature"},
+    "interpolateNulls":true,
+    "lineWidth":1,
+    "pointSize":2
+  })
+  
+  print(chart)
