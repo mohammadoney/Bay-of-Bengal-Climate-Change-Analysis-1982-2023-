@@ -1,6 +1,6 @@
 # Bay-of-Bengal-Temperature-Trends-1974-2023-
-
 Workflow
+
 Data Acquisition:
 I imported the TerraClimate dataset, a global, high-resolution climate dataset.
 I imported a custom-defined geometry representing the Bay of Bengal region from my Google Earth Engine (GEE) assets.
