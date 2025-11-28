@@ -1,4 +1,5 @@
-Bay of Bengal Climate Change Analysis: Quantifying Sea Surface Temperature Warming (1982-2023)
+##Bay of Bengal Climate Change Analysis: Quantifying Sea Surface Temperature Warming (1982-2023)
+
 I conducted a comprehensive climate change analysis of the Bay of Bengal, processing 42 years of satellite data to quantify sea surface temperature warming trends. The project involved a complete end-to-end geospatial workflow from data acquisition in Google Earth Engine to advanced statistical analysis in Python, identifying statistically significant warming patterns across the region.
 
 The Complete Process:
