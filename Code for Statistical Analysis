@@ -1,386 +1,115 @@
-import pandas as pd
+# 1st Analysis: To identify temporal change and measure it 
+!pip install rasterio rioxarray
+
 import numpy as np
-from statsmodels.tsa.seasonal import STL
-from scipy.stats import kendalltau, norm
-from scipy.stats.mstats import theilslopes
+import xarray as xr
+import pandas as pd
+import pymannkendall as mk
+import rioxarray  # activates the rio accessor/backend [web:90][web:99]
+
+tif_path = "/content/drive/MyDrive/earthengine/Annual_Median_SST_BoB_1982_2024.tif"
+
+# Load as DataArray: dims ('band','y','x')
+da = rioxarray.open_rasterio(tif_path)  # or xr.open_dataarray(..., engine="rasterio") after this [web:94][web:91]
+
+# Time coord: 1982–2024
+n_time = da.sizes["band"]
+start_year = 1982
+time = pd.date_range(f"{start_year}-01-01", periods=n_time, freq="AS")
+
+da = da.assign_coords(band=time).rename(band="time")
+
+# Basin-mean annual SST
+basin_ts_annual = da.mean(dim=("y", "x"), skipna=True)
+
+y = basin_ts_annual.values
+mask = np.isfinite(y)
+y_clean = y[mask]
+
+result = mk.original_test(y_clean)
+
+print("Years:", time[mask][0].year, "to", time[mask][-1].year)
+print("Trend:", result.trend)
+print("h (significant?):", result.h)
+print("p-value:", result.p)
+print("Tau:", result.Tau)
+print("Z:", result.z)
+print("Sen's slope (SST units/year):", result.slope)
+print("Intercept:", result.intercept)
+
+# 2nd Analysis: To identify saptial change
+!pip install rasterio pymannkendall matplotlib numpy
+import numpy as np
+import rasterio
+from rasterio.plot import show
+import pymannkendall as mk
 import matplotlib.pyplot as plt
-import matplotlib as mpl
 
-# ============================================================================
-# ACADEMIC-QUALITY SEA SURFACE TEMPERATURE TREND ANALYSIS
-# Bay of Bengal (1982-2024)
-# ============================================================================
+tif_path = "/content/drive/MyDrive/earthengine/Annual_Median_SST_BoB_1982_2024.tif"
 
-# Set academic plotting style with safe font fallbacks
-try:
-    # Try to set academic fonts
-    mpl.rcParams.update({
-        'font.family': 'sans-serif',
-        'font.sans-serif': ['DejaVu Sans', 'Arial', 'Helvetica', 'Liberation Sans'],
-        'font.size': 11,
-        'axes.titlesize': 12,
-        'axes.labelsize': 11,
-        'xtick.labelsize': 10,
-        'ytick.labelsize': 10,
-        'legend.fontsize': 10,
-        'figure.titlesize': 14,
-        'figure.dpi': 150,
-        'savefig.dpi': 300,
-        'savefig.bbox': 'tight',
-        'savefig.pad_inches': 0.1,
-        'axes.grid': True,
-        'grid.alpha': 0.3,
-        'grid.linestyle': '--'
-    })
-except:
-    # Use default matplotlib settings if font issues
-    print("Note: Using default matplotlib fonts")
-    mpl.rcParams.update({
-        'font.size': 11,
-        'axes.titlesize': 12,
-        'axes.labelsize': 11,
-        'figure.dpi': 150,
-        'savefig.dpi': 300
-    })
+# ---- read the GeoTIFF ----
+with rasterio.open(tif_path) as src:
+    data = src.read()           # shape: (T, Y, X)
+    meta = src.meta.copy()
 
-# Load the data
-file_path = '/content/drive/MyDrive/earthengine/Monthly_SST_TimeSeries_Bay_of_Bengal_1982_2024.csv'
-df = pd.read_csv(file_path)
+# assume first axis is time (one band per year)
+n_t, n_y, n_x = data.shape
 
-# Convert date to datetime and set as index
-df['date'] = pd.to_datetime(df['date'])
-df = df.set_index('date').sort_index()
-sst_series = df['mean_sst']
+# pre‑allocate Sen’s slope and MK Z
+sen_slope = np.full((n_y, n_x), np.nan, dtype="float32")
+mk_z      = np.full((n_y, n_x), np.nan, dtype="float32")
 
-print("=" * 90)
-print("SEA SURFACE TEMPERATURE TREND ANALYSIS: BAY OF BENGAL (1982-2024)")
-print("=" * 90)
-print("\n")
-print("METHODS")
-print("-------")
-print("1. Data: Monthly mean SST from NOAA OISST v2.1 (1982-2024)")
-print("2. STL decomposition: Seasonal-Trend decomposition using LOESS")
-print("3. Trend detection: Mann-Kendall non-parametric test (α = 0.05)")
-print("4. Trend magnitude: Sen's slope estimator with 95% confidence intervals")
-print("5. Statistical significance: Two-tailed tests")
-print("\n")
+# time step (years) – here 1 year between images
+dt = 1.0
 
-# ============================================================================
-# 1. STL DECOMPOSITION
-# ============================================================================
-print("1. STL DECOMPOSITION RESULTS")
-print("-" * 40)
+for i in range(n_y):
+    for j in range(n_x):
+        ts = data[:, i, j]
 
-# Perform STL decomposition
-stl = STL(sst_series, period=12, robust=True)
-result = stl.fit()
+        # mask pixels that are all nan
+        if np.all(np.isnan(ts)):
+            continue
 
-# Extract components
-trend_component = result.trend
-seasonal_component = result.seasonal
-residual_component = result.resid
+        # drop nans
+        mask = ~np.isnan(ts)
+        y = ts[mask]
 
-# Calculate descriptive statistics
-trend_range = f"{trend_component.min():.3f} to {trend_component.max():.3f}"
-seasonal_amplitude = seasonal_component.max() - seasonal_component.min()
-residual_std = residual_component.std()
+        if y.size < 5:   # too short to test
+            continue
 
-print(f"Time period: {sst_series.index[0].strftime('%B %Y')} to {sst_series.index[-1].strftime('%B %Y')}")
-print(f"Total observations: {len(sst_series):,} (monthly values)")
-print(f"\nComponent Statistics:")
-print(f"  Trend range: {trend_range} °C")
-print(f"  Trend mean: {trend_component.mean():.3f} ± {trend_component.std():.3f} °C")
-print(f"  Seasonal amplitude: {seasonal_amplitude:.3f} °C")
-print(f"  Residual standard deviation: {residual_std:.3f} °C")
+        # Mann–Kendall + Sen’s slope
+        res = mk.original_test(y)   # trend, h, p, z, Tau, s, var_s, slope, intercept [web:7][web:9]
+        sen_slope[i, j] = res.slope / dt
+        mk_z[i, j]      = res.z
 
-# ============================================================================
-# 2. MANN-KENDALL TREND TEST
-# ============================================================================
-print("\n" + "=" * 90)
-print("2. MANN-KENDALL TREND TEST RESULTS")
-print("-" * 40)
+# ---- plot like your figure ----
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
 
-# Remove NaN values from trend component
-trend_no_nan = trend_component.dropna()
-n = len(trend_no_nan)
-
-# Calculate Mann-Kendall S statistic
-S = 0
-for i in range(n - 1):
-    for j in range(i + 1, n):
-        S += np.sign(trend_no_nan.iloc[j] - trend_no_nan.iloc[i])
-
-# Calculate variance with tie correction
-unique_values, counts = np.unique(trend_no_nan, return_counts=True)
-tie_correction = np.sum(counts * (counts - 1) * (2 * counts + 5))
-var_S = (n * (n - 1) * (2 * n + 5) - tie_correction) / 18
-
-# Calculate Z statistic
-if S > 0:
-    Z = (S - 1) / np.sqrt(var_S)
-elif S < 0:
-    Z = (S + 1) / np.sqrt(var_S)
-else:
-    Z = 0
-
-# Calculate p-value (two-tailed test)
-p_value = 2 * (1 - norm.cdf(abs(Z)))
-
-# Determine significance
-alpha = 0.05
-is_significant = p_value < alpha
-significance_level = "Significant" if is_significant else "Not significant"
-
-# Determine direction
-if S > 0:
-    direction = "Increasing"
-elif S < 0:
-    direction = "Decreasing"
-else:
-    direction = "No trend"
-
-print(f"TEST STATISTICS:")
-print(f"  S statistic: {S:,.0f}")
-print(f"  Variance: {var_S:.1f}")
-print(f"  Z-score: {Z:.3f}")
-print(f"  p-value: {p_value:.5f}")
-print(f"\nHYPOTHESIS TEST (α = {alpha}):")
-print(f"  Null hypothesis (H₀): No monotonic trend")
-print(f"  Alternative hypothesis (H₁): Monotonic trend exists")
-print(f"  Result: {significance_level}")
-print(f"  Trend direction: {direction}")
-
-# ============================================================================
-# 3. SEN'S SLOPE ESTIMATOR
-# ============================================================================
-print("\n" + "=" * 90)
-print("3. SEN'S SLOPE ESTIMATOR RESULTS")
-print("-" * 40)
-
-# Calculate Sen's slope using Theil-Sen estimator
-sen_slope, intercept, lower_slope, upper_slope = theilslopes(
-    trend_no_nan.values,
-    np.arange(len(trend_no_nan)),
-    alpha=0.95
+# Sen's slope map
+im1 = ax1.imshow(
+    sen_slope,
+    cmap="RdBu_r",
+    vmin=-0.03, vmax=0.03,   # adjust to your range
+    origin="upper"
 )
+ax1.set_title("SSD Trend Magnitude (Sen’s Slope per Year)")
+ax1.axis("off")
+cbar1 = fig.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04)
+cbar1.set_label("Sen’s slope (per year)")
 
-# Convert to different time units
-sen_slope_per_month = sen_slope
-sen_slope_per_year = sen_slope_per_month * 12
-sen_slope_per_decade = sen_slope_per_year * 10
-
-lower_per_decade = lower_slope * 12 * 10
-upper_per_decade = upper_slope * 12 * 10
-
-# Calculate total change over period
-total_months = len(trend_no_nan)
-total_years = total_months / 12
-total_change = sen_slope_per_month * total_months
-percent_change = (total_change / trend_no_nan.iloc[0]) * 100
-
-print(f"TREND MAGNITUDE:")
-print(f"  Monthly rate: {sen_slope_per_month:.5f} °C month⁻¹")
-print(f"  Annual rate: {sen_slope_per_year:.4f} °C year⁻¹")
-print(f"  Decadal rate: {sen_slope_per_decade:.3f} °C decade⁻¹")
-print(f"\n95% CONFIDENCE INTERVALS:")
-print(f"  Per decade: [{lower_per_decade:.3f}, {upper_per_decade:.3f}] °C decade⁻¹")
-print(f"\nTOTAL CHANGE OVER STUDY PERIOD:")
-print(f"  Duration: {total_years:.1f} years ({total_months:,} months)")
-print(f"  Total temperature change: {total_change:.3f} °C")
-print(f"  Percentage change: {percent_change:.2f}%")
-
-# ============================================================================
-# 4. VERIFICATION WITH ALTERNATIVE METHODS
-# ============================================================================
-print("\n" + "=" * 90)
-print("4. METHOD VERIFICATION")
-print("-" * 40)
-
-# Kendall's tau correlation
-tau, p_value_tau = kendalltau(np.arange(len(trend_no_nan)), trend_no_nan.values)
-
-print(f"KENDALL'S RANK CORRELATION:")
-print(f"  τ coefficient: {tau:.4f}")
-print(f"  p-value: {p_value_tau:.5f}")
-print(f"  Interpretation: {'Significant' if p_value_tau < 0.05 else 'Not significant'} correlation")
-
-# ============================================================================
-# 5. COMPREHENSIVE SUMMARY
-# ============================================================================
-print("\n" + "=" * 90)
-print("5. COMPREHENSIVE TREND SUMMARY")
-print("-" * 40)
-
-# Create summary table
-summary_data = [
-    ["Parameter", "Value"],
-    ["-" * 30, "-" * 30],
-    ["Study period", f"{sst_series.index[0].strftime('%Y')}-{sst_series.index[-1].strftime('%Y')}"],
-    ["Duration", f"{total_years:.1f} years"],
-    ["Observations", f"{len(sst_series):,} monthly values"],
-    ["", ""],
-    ["Trend direction", direction],
-    ["Statistical significance", significance_level],
-    ["Mann-Kendall p-value", f"{p_value:.5f}"],
-    ["Sen's slope", f"{sen_slope_per_decade:.3f} °C decade⁻¹"],
-    ["95% Confidence interval", f"[{lower_per_decade:.3f}, {upper_per_decade:.3f}] °C decade⁻¹"],
-    ["Total temperature change", f"{total_change:.3f} °C"],
-    ["Kendall's τ", f"{tau:.4f}"],
-    ["Residual variability", f"{residual_std:.3f} °C"]
-]
-
-# Print formatted table
-for row in summary_data:
-    print(f"{row[0]:<30} {row[1]:<30}")
-
-# ============================================================================
-# 6. ACADEMIC-QUALITY VISUALIZATION
-# ============================================================================
-print("\n" + "=" * 90)
-print("6. VISUALIZATION OF RESULTS")
-print("-" * 40)
-
-# Create figure with subplots
-fig = plt.figure(figsize=(14, 10))
-
-# Panel A: Original SST series with trend overlay
-ax1 = plt.subplot(2, 3, 1)
-ax1.plot(sst_series.index, sst_series, color='steelblue', linewidth=0.6, alpha=0.6, label='Monthly SST')
-ax1.plot(trend_component.index, trend_component, color='crimson', linewidth=1.5, label='Trend')
-ax1.set_ylabel('Sea Surface Temperature (°C)')
-ax1.set_title('(A) SST with Trend Component', fontweight='bold')
-ax1.legend(loc='upper left', fontsize=9)
-ax1.grid(True, alpha=0.2)
-plt.setp(ax1.xaxis.get_majorticklabels(), rotation=45, ha='right')
-
-# Panel B: Trend component with Sen's slope
-ax2 = plt.subplot(2, 3, 2)
-x_vals = np.arange(len(trend_no_nan))
-ax2.plot(trend_no_nan.index, trend_no_nan.values, color='black', linewidth=1.2, label='Detrended SST')
-ax2.plot(trend_no_nan.index, intercept + sen_slope_per_month * x_vals,
-         color='red', linestyle='--', linewidth=1.8,
-         label=f"Sen's slope: {sen_slope_per_decade:.3f}°C/decade")
-ax2.fill_between(trend_no_nan.index,
-                intercept + lower_slope * x_vals,
-                intercept + upper_slope * x_vals,
-                alpha=0.15, color='red', label='95% CI')
-ax2.set_ylabel('Temperature (°C)')
-ax2.set_title('(B) Trend with Sen\'s Slope', fontweight='bold')
-ax2.legend(loc='upper left', fontsize=9)
-ax2.grid(True, alpha=0.2)
-plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45, ha='right')
-
-# Panel C: Seasonal component
-ax3 = plt.subplot(2, 3, 3)
-# Get average seasonal cycle
-monthly_seasonal = []
-months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-          'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-for month in range(1, 13):
-    monthly_seasonal.append(seasonal_component[seasonal_component.index.month == month].mean())
-ax3.bar(range(12), monthly_seasonal, color='seagreen', alpha=0.7, edgecolor='black')
-ax3.set_xlabel('Month')
-ax3.set_ylabel('Seasonal Component (°C)')
-ax3.set_title('(C) Average Seasonal Cycle', fontweight='bold')
-ax3.set_xticks(range(12))
-ax3.set_xticklabels(months, rotation=45)
-ax3.grid(True, alpha=0.2, axis='y')
-ax3.axhline(y=0, color='black', linewidth=0.5, linestyle='-', alpha=0.5)
-
-# Panel D: Residual distribution
-ax4 = plt.subplot(2, 3, 4)
-n_bins = 25
-counts, bins, patches = ax4.hist(residual_component, bins=n_bins, color='gray',
-                                 alpha=0.7, edgecolor='black', density=True)
-# Add normal distribution for comparison
-mu, sigma = residual_component.mean(), residual_component.std()
-x = np.linspace(residual_component.min(), residual_component.max(), 100)
-y = norm.pdf(x, mu, sigma)
-ax4.plot(x, y, 'r-', linewidth=2, label=f'Normal: μ={mu:.3f}, σ={sigma:.3f}')
-ax4.axvline(x=0, color='black', linestyle='--', linewidth=1, alpha=0.5)
-ax4.set_xlabel('Residual Temperature (°C)')
-ax4.set_ylabel('Density')
-ax4.set_title('(D) Residual Distribution', fontweight='bold')
-ax4.legend(fontsize=9)
-ax4.grid(True, alpha=0.2)
-
-# Panel E: Decadal averages
-ax5 = plt.subplot(2, 3, 5)
-# Calculate decadal averages
-df['decade'] = (df.index.year // 10) * 10
-decadal_avg = df.groupby('decade')['mean_sst'].mean()
-bars = ax5.bar([str(d) for d in decadal_avg.index], decadal_avg.values,
-               color='teal', alpha=0.7, edgecolor='black')
-# Add value labels on bars
-for bar in bars:
-    height = bar.get_height()
-    ax5.text(bar.get_x() + bar.get_width()/2., height + 0.05,
-             f'{height:.2f}', ha='center', va='bottom', fontsize=8)
-ax5.set_xlabel('Decade')
-ax5.set_ylabel('Average SST (°C)')
-ax5.set_title('(E) Decadal Averages', fontweight='bold')
-ax5.grid(True, alpha=0.2, axis='y')
-plt.setp(ax5.xaxis.get_majorticklabels(), rotation=45, ha='right')
-
-# Panel F: Summary text
-ax6 = plt.subplot(2, 3, 6)
-ax6.axis('off')
-
-summary_text = (
-    "TREND ANALYSIS SUMMARY\n\n"
-    f"Period: {sst_series.index[0].strftime('%Y')}-{sst_series.index[-1].strftime('%Y')}\n"
-    f"Duration: {total_years:.0f} years\n"
-    f"Observations: {len(sst_series):,}\n\n"
-    "Mann-Kendall Test:\n"
-    f"  Direction: {direction}\n"
-    f"  Z = {Z:.2f}, p = {p_value:.4f}\n"
-    f"  Significance: {significance_level}\n\n"
-    "Sen's Slope:\n"
-    f"  Rate: {sen_slope_per_decade:.3f} °C/decade\n"
-    f"  95% CI: [{lower_per_decade:.3f}, {upper_per_decade:.3f}]\n"
-    f"  Total ΔT: {total_change:.2f} °C\n\n"
-    f"Kendall's τ = {tau:.3f}"
+# MK Z-score map
+im2 = ax2.imshow(
+    mk_z,
+    cmap="RdBu_r",
+    vmin=-4, vmax=4,
+    origin="upper"
 )
+ax2.set_title("SSD Trend Significance (MK Z-Score)")
+ax2.axis("off")
+cbar2 = fig.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04)
+cbar2.set_label("MK Z-score")
 
-props = dict(boxstyle='round', facecolor='wheat', alpha=0.8, pad=0.5)
-ax6.text(0.05, 0.95, summary_text, transform=ax6.transAxes, fontsize=9,
-         verticalalignment='top', bbox=props, fontfamily='monospace')
-
-plt.suptitle('Sea Surface Temperature Trend Analysis: Bay of Bengal (1982-2024)',
-             fontsize=14, fontweight='bold', y=0.98)
-plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-
-print("Figure generated successfully.")
+plt.tight_layout()
 plt.show()
 
-# ============================================================================
-# 7. SCIENTIFIC INTERPRETATION
-# ============================================================================
-print("\n" + "=" * 90)
-print("7. SCIENTIFIC INTERPRETATION")
-print("-" * 40)
 
-if is_significant:
-    if direction == "Increasing":
-        print(f"The analysis reveals a statistically significant warming trend in the ")
-        print(f"Bay of Bengal from {sst_series.index[0].strftime('%Y')} to {sst_series.index[-1].strftime('%Y')}.")
-        print(f"\nKey findings:")
-        print(f"1. Warming rate: {sen_slope_per_decade:.3f} °C per decade")
-        print(f"2. Total warming: {total_change:.2f} °C over {total_years:.0f} years")
-        print(f"3. Statistical confidence: p = {p_value:.4f} (significant at α = 0.05)")
-        print(f"4. The 95% confidence interval does not include zero, confirming trend robustness.")
-    else:
-        print(f"The analysis reveals a statistically significant cooling trend.")
-else:
-    print(f"No statistically significant trend was detected in the Bay of Bengal SST ")
-    print(f"from {sst_series.index[0].strftime('%Y')} to {sst_series.index[-1].strftime('%Y')}.")
-    print(f"\nInterpretation:")
-    print(f"1. Observed rate: {sen_slope_per_decade:.3f} °C per decade (not statistically significant)")
-    print(f"2. The null hypothesis of no trend cannot be rejected (p = {p_value:.4f})")
-    print(f"3. Natural variability may explain observed fluctuations")
-
-print("\n" + "=" * 90)
-print("ANALYSIS COMPLETE")
-print("=" * 90)
-print("\nReference: This analysis follows established climatological methods")
-print("for trend detection in environmental time series.")
